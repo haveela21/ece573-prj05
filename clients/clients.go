@@ -5,6 +5,7 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"context"
 
 	"github.com/IBM/sarama"
 )
@@ -56,24 +57,44 @@ func producer(broker, topic string) {
 }
 
 func consumer(broker, topic string) {
-	consumer, err := sarama.NewConsumer([]string{broker}, nil)
-	if err != nil {
-		log.Fatalf("Cannot create consumer at %s: %v", broker, err)
-	}
-	defer consumer.Close()
+	config := sarama.NewConfig()
+	config.Version = sarama.V2_8_0_0
+	config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRoundRobin
 
-	partitionConsumer, err := consumer.ConsumePartition(topic, 0, sarama.OffsetNewest)
+	// Define a consumer group
+	consumerGroup, err := sarama.NewConsumerGroup([]string{broker}, "example-group", config)
 	if err != nil {
-		log.Fatalf("Cannot create partition consumer at %s: %v", broker, err)
+		log.Fatalf("Cannot create consumer group at %s: %v", broker, err)
 	}
-	defer partitionConsumer.Close()
+	defer consumerGroup.Close()
 
-	log.Printf("%s: start receiving messages from %s", topic, broker)
-	for count := 1; ; count++ {
-		msg := <-partitionConsumer.Messages()
-		if count%1000 == 0 {
-			log.Printf("%s: received %d messages, last (%s)",
-				topic, count, string(msg.Value))
+	// Create a new ConsumerGroupHandler instance
+	consumer := &ConsumerGroupHandler{}
+
+	// Start consuming messages using a valid context
+	for {
+		// Use a background context to run the consumer loop
+		err := consumerGroup.Consume(context.Background(), []string{topic}, consumer)
+		if err != nil {
+			log.Fatalf("Error during consumption: %v", err)
 		}
 	}
+}
+
+type ConsumerGroupHandler struct{}
+
+// Setup is run before consuming any messages.
+func (c *ConsumerGroupHandler) Setup(sarama.ConsumerGroupSession) error { return nil }
+
+// Cleanup is run after all messages have been consumed.
+func (c *ConsumerGroupHandler) Cleanup(sarama.ConsumerGroupSession) error { return nil }
+
+// ConsumeClaim processes a batch of messages.
+func (c *ConsumerGroupHandler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	for msg := range claim.Messages() {
+		log.Printf("Message claimed: topic=%s, partition=%d, offset=%d, value=%s", msg.Topic, msg.Partition, msg.Offset, string(msg.Value))
+		// Mark the message as processed
+		sess.MarkMessage(msg, "")
+	}
+	return nil
 }
